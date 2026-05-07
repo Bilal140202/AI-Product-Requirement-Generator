@@ -7,6 +7,7 @@ type GenerateLocalPrdInput = {
   constraints?: string;
   competitors?: string;
   onProgress?: (message: string) => void;
+  onChunk?: (chunk: string) => void;
 };
 
 let cachedModel = "";
@@ -16,13 +17,24 @@ let cachedEngine: {
       create(args: {
         messages: Array<{ role: "system" | "user"; content: string }>;
         temperature: number;
-      }): Promise<{
-        choices?: Array<{
-          message?: {
-            content?: string | null;
-          };
-        }>;
-      }>;
+        stream?: boolean;
+        stream_options?: { include_usage?: boolean };
+      }): Promise<
+        | {
+            choices?: Array<{
+              message?: {
+                content?: string | null;
+              };
+            }>;
+          }
+        | AsyncIterable<{
+            choices?: Array<{
+              delta?: {
+                content?: string | null;
+              };
+            }>;
+          }>
+      >;
     };
   };
 } | null = null;
@@ -61,7 +73,7 @@ export async function generatePrdWithWebLLM(input: GenerateLocalPrdInput) {
 
   input.onProgress?.("Running local inference...");
 
-  const reply = await cachedEngine.chat.completions.create({
+  const streamed = await cachedEngine.chat.completions.create({
     messages: [
       {
         role: "system",
@@ -73,11 +85,26 @@ export async function generatePrdWithWebLLM(input: GenerateLocalPrdInput) {
         content: buildPrompt(input)
       }
     ],
-    temperature: 0.4
+    temperature: 0.4,
+    stream: true,
+    stream_options: { include_usage: true }
   });
 
-  const markdown = reply.choices?.[0]?.message?.content?.trim();
-  if (!markdown) {
+  let markdown = "";
+
+  for await (const chunk of streamed as AsyncIterable<{
+    choices?: Array<{
+      delta?: { content?: string | null };
+    }>;
+  }>) {
+    const nextChunk = chunk.choices?.[0]?.delta?.content ?? "";
+    if (nextChunk) {
+      markdown += nextChunk;
+      input.onChunk?.(nextChunk);
+    }
+  }
+
+  if (!markdown.trim()) {
     throw new Error("WebLLM did not return markdown content.");
   }
 

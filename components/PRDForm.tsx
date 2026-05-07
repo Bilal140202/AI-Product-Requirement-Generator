@@ -27,6 +27,41 @@ function extractTitle(markdown: string, fallbackIdea: string) {
   return fallbackIdea;
 }
 
+async function readTextStream(response: Response, onChunk: (chunk: string) => void) {
+  if (!response.ok) {
+    const failureText = await response.text();
+    try {
+      const json = JSON.parse(failureText) as { error?: string };
+      throw new Error(json.error || "Failed to generate PRD.");
+    } catch {
+      throw new Error(failureText || "Failed to generate PRD.");
+    }
+  }
+
+  if (!response.body) {
+    throw new Error("The provider response did not include a readable stream.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    const chunk = decoder.decode(value, { stream: true });
+    if (chunk) {
+      output += chunk;
+      onChunk(chunk);
+    }
+  }
+
+  return output;
+}
+
 export function PRDForm() {
   const [provider, setProvider] = useState<Provider>("pollinations");
   const [apiKey, setApiKey] = useState("");
@@ -60,10 +95,11 @@ export function PRDForm() {
     setLoading(true);
     setError("");
     setLiveStatus("");
+    setMarkdown("");
+    setAssetUrl("");
 
     try {
       let nextMarkdown = "";
-      let nextTitle = idea;
 
       if (provider === "webllm") {
         nextMarkdown = await generatePrdWithWebLLM({
@@ -72,9 +108,11 @@ export function PRDForm() {
           audience,
           constraints,
           competitors,
-          onProgress: setLiveStatus
+          onProgress: setLiveStatus,
+          onChunk: (chunk) => {
+            setMarkdown((current) => current + chunk);
+          }
         });
-        nextTitle = extractTitle(nextMarkdown, idea);
       } else {
         const payload = {
           provider,
@@ -94,17 +132,12 @@ export function PRDForm() {
           body: JSON.stringify(payload)
         });
 
-        const data = (await response.json()) as { markdown?: string; error?: string; title?: string };
-
-        if (!response.ok || !data.markdown) {
-          throw new Error(data.error || "Failed to generate PRD.");
-        }
-
-        nextMarkdown = data.markdown;
-        nextTitle = data.title || idea;
+        nextMarkdown = await readTextStream(response, (chunk) => {
+          setMarkdown((current) => current + chunk);
+        });
       }
 
-      setMarkdown(nextMarkdown);
+      const nextTitle = extractTitle(nextMarkdown, idea);
 
       if (provider !== "webllm") {
         const assetResponse = await fetch("/api/assets", {
@@ -123,8 +156,6 @@ export function PRDForm() {
           const assetData = (await assetResponse.json()) as AssetPayload;
           setAssetUrl(assetData.imageUrl || "");
         }
-      } else {
-        setAssetUrl("");
       }
     } catch (submissionError) {
       setError(
@@ -146,7 +177,7 @@ export function PRDForm() {
           </div>
           <div>
             <h2 className="text-xl font-semibold text-white">Generate a PRD</h2>
-            <p className="text-sm text-slate-400">Use a real provider only. No placeholder PRDs are returned anymore.</p>
+            <p className="text-sm text-slate-400">Use a real provider only. Output now streams progressively into the viewer.</p>
           </div>
         </div>
 
@@ -162,7 +193,7 @@ export function PRDForm() {
                   if (nextProvider === "openrouter") {
                     setModel("openai/gpt-4.1-mini");
                   } else if (nextProvider === "webllm") {
-                    setModel("Llama-3.1-8B-Instruct");
+                    setModel("Llama-3.2-1B-Instruct-q4f32_1-MLC");
                   } else {
                     setModel("openai");
                   }
@@ -191,7 +222,7 @@ export function PRDForm() {
                   provider === "openrouter"
                     ? "sk-or-v1-..."
                     : provider === "pollinations"
-                      ? "Optional if your Pollinations endpoint allows anonymous access"
+                      ? "Required by current Pollinations auth rules"
                       : "Runs directly in the browser with WebGPU"
                 }
                 type="password"
@@ -209,7 +240,7 @@ export function PRDForm() {
                 provider === "openrouter"
                   ? "openai/gpt-4.1-mini"
                   : provider === "webllm"
-                    ? "Llama-3.1-8B-Instruct"
+                    ? "Llama-3.2-1B-Instruct-q4f32_1-MLC"
                     : "openai"
               }
               value={model}
@@ -255,7 +286,12 @@ export function PRDForm() {
         <div className="mt-6 flex flex-wrap items-center gap-4">
           <button
             className="inline-flex items-center gap-2 rounded-full bg-sky-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:opacity-70"
-            disabled={loading || !model.trim() || (provider === "openrouter" && !apiKey.trim())}
+            disabled={
+              loading ||
+              !model.trim() ||
+              (provider === "openrouter" && !apiKey.trim()) ||
+              (provider === "pollinations" && !apiKey.trim())
+            }
             type="submit"
           >
             <WandSparkles className="h-4 w-4" />
@@ -265,13 +301,11 @@ export function PRDForm() {
           {loading && provider === "webllm" && liveStatus ? <span className="text-sm text-slate-400">{liveStatus}</span> : null}
           {error ? <span className="text-sm text-rose-300">{error}</span> : null}
           {!error && provider === "pollinations" ? (
-            <span className="text-sm text-slate-500">
-              Pollinations is attempted live. If your endpoint rejects anonymous access, add a key and retry.
-            </span>
+            <span className="text-sm text-slate-500">Pollinations text generation currently expects authentication for generation requests.</span>
           ) : null}
           {!error && provider === "webllm" ? (
             <span className="text-sm text-slate-500">
-              WebLLM runs fully in-browser and requires a WebGPU-capable browser. First load may download a large model.
+              WebLLM runs fully in-browser with a smaller default model. First load still downloads model assets and requires WebGPU.
             </span>
           ) : null}
         </div>
@@ -281,7 +315,7 @@ export function PRDForm() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-xl font-semibold text-white">Results</h2>
-            <p className="text-sm text-slate-400">Review the generated document, copy it, or export it as a PDF.</p>
+            <p className="text-sm text-slate-400">Review the generated document as it streams, then copy it or export it as a PDF.</p>
           </div>
           <ExportButtons markdown={markdown} targetId="prd-output" />
         </div>

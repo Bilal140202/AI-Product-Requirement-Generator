@@ -1,4 +1,4 @@
-import { generatePrd } from "@/lib/nyok-client";
+import { streamPrd } from "@/lib/nyok-client";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Idea is required." }, { status: 400 });
     }
 
-    const result = await generatePrd({
+    const stream = await streamPrd({
       provider: body.provider,
       apiKey: body.apiKey?.trim(),
       model: body.model?.trim(),
@@ -31,7 +31,12 @@ export async function POST(request: NextRequest) {
       competitors: body.competitors?.trim()
     });
 
-    return NextResponse.json(result);
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform"
+      }
+    });
   } catch (error) {
     return NextResponse.json(
       {

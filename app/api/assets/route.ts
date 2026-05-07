@@ -13,11 +13,22 @@ export async function POST(request: NextRequest) {
     const forwardedFor = request.headers.get("x-forwarded-for") || "local";
     enforceRateLimit(`asset:${forwardedFor}`);
 
-    const body = (await request.json()) as { title?: string };
+    const body = (await request.json()) as {
+      title?: string;
+      provider?: "openrouter" | "pollinations";
+      apiKey?: string;
+    };
     const title = body.title?.trim() || "Product Requirements";
+    const imageUrl = buildImageUrl(title);
+
+    if (body.provider === "pollinations" && body.apiKey?.trim()) {
+      return NextResponse.json({
+        imageUrl: `${imageUrl}&key=${encodeURIComponent(body.apiKey.trim())}`
+      });
+    }
 
     return NextResponse.json({
-      imageUrl: buildImageUrl(title)
+      imageUrl
     });
   } catch (error) {
     return NextResponse.json(

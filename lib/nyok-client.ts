@@ -4,13 +4,28 @@ const SYSTEM_PROMPT = `You are a senior Product Manager. Output a markdown PRD w
 3. User Stories
 4. Non-functional Requirements
 5. MVP Scope
-6. Delivery Plan`;
+6. Delivery Plan
+
+Do not use placeholders or generic filler. Base every section on the user's actual product idea, audience, constraints, and competitors.`;
+
+type Provider = "openrouter" | "pollinations";
 
 type GeneratePrdInput = {
+  provider?: Provider;
+  apiKey?: string;
+  model?: string;
   idea: string;
   audience?: string;
   constraints?: string;
   competitors?: string;
+};
+
+type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+    };
+  }>;
 };
 
 function buildPrompt(input: GeneratePrdInput) {
@@ -18,13 +33,19 @@ function buildPrompt(input: GeneratePrdInput) {
     `Idea: ${input.idea}`,
     `Target Audience: ${input.audience || "Not specified"}`,
     `Technical Constraints: ${input.constraints || "Not specified"}`,
-    `Competitors: ${input.competitors || "Not specified"}`
+    `Competitors: ${input.competitors || "Not specified"}`,
+    "Return only the finished markdown PRD."
   ].join("\n");
 }
 
-function extractTitle(idea: string) {
+function extractTitle(markdown: string, fallbackIdea: string) {
+  const firstHeading = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  if (firstHeading) {
+    return firstHeading.replace(/\s+PRD$/i, "");
+  }
+
   return (
-    idea
+    fallbackIdea
       .replace(/[^a-zA-Z0-9 ]/g, " ")
       .trim()
       .split(/\s+/)
@@ -33,90 +54,103 @@ function extractTitle(idea: string) {
   );
 }
 
-function buildFallbackPrd(input: GeneratePrdInput) {
-  const title = extractTitle(input.idea);
-  return {
-    title,
-    markdown: `# ${title} PRD
+function extractMarkdown(payload: ChatCompletionResponse) {
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content === "string") {
+    return content.trim();
+  }
 
-## 1. Objective
-Build ${input.idea.trim()} with a clear first-release scope that validates demand quickly and creates a foundation for iteration.
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part.type === "text" ? part.text || "" : ""))
+      .join("")
+      .trim();
+  }
 
-## 2. Target Audience
-- Primary users: ${input.audience || "Early adopters and internal stakeholders"}
-- Core pain point: they need a faster, clearer way to solve the job described in the prompt
-- Success signal: repeat usage and measurable reduction in manual effort
-
-## 3. User Stories
-- As a primary user, I want to understand the product value immediately so I can decide whether it solves my problem.
-- As a primary user, I want a simple onboarding and first action flow so I can reach value within minutes.
-- As a team owner, I want the product to capture structured usage data so I can prioritize future work.
-- As an operator, I want guardrails around failures and edge cases so the product remains reliable.
-
-## 4. Non-functional Requirements
-- Performance: core interactions should feel responsive on standard desktop and mobile devices.
-- Reliability: user input should not be lost during transient API failures.
-- Security: sensitive inputs and keys must stay server-side.
-- Accessibility: keyboard-accessible controls and readable contrast are required.
-
-## 5. MVP Scope
-- Landing page explaining the product value
-- Primary workflow for submitting the idea and reviewing generated output
-- Export and copy actions for the generated PRD
-- Basic analytics and error states for failed generation attempts
-
-## 6. Delivery Plan
-1. Ship the core generation flow and structured output.
-2. Validate generated quality against real prompts from the target audience.
-3. Add richer collaboration, templates, and revision workflows after initial feedback.
-
-## Notes
-- Constraints: ${input.constraints || "None specified"}
-- Competitors to evaluate: ${input.competitors || "None specified"}
-`
-  };
+  return "";
 }
 
-export async function generatePrd(input: GeneratePrdInput) {
-  const apiUrl = process.env.NYOK_API_URL;
-  const apiKey = process.env.NYOK_API_KEY;
-  const model = process.env.NYOK_MODEL;
+async function callOpenAiCompatibleApi(
+  apiUrl: string,
+  apiKey: string | undefined,
+  model: string,
+  input: GeneratePrdInput,
+  extraHeaders?: Record<string, string>
+) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...extraHeaders
+  };
 
-  if (!apiUrl || !apiKey) {
-    return buildFallbackPrd(input);
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
   }
 
   const response = await fetch(apiUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
+    headers,
     body: JSON.stringify({
       model,
-      system: SYSTEM_PROMPT,
-      prompt: buildPrompt(input)
+      temperature: 0.4,
+      messages: [
+        {
+          role: "system",
+          content: SYSTEM_PROMPT
+        },
+        {
+          role: "user",
+          content: buildPrompt(input)
+        }
+      ]
     })
   });
 
   if (!response.ok) {
-    throw new Error(`NYOK request failed with status ${response.status}.`);
+    const failureText = await response.text();
+    throw new Error(
+      `Provider request failed with status ${response.status}${failureText ? `: ${failureText}` : "."}`
+    );
   }
 
-  const payload = (await response.json()) as {
-    text?: string;
-    output?: string;
-    content?: string;
-    title?: string;
-  };
-
-  const markdown = payload.text || payload.output || payload.content;
+  const payload = (await response.json()) as ChatCompletionResponse;
+  const markdown = extractMarkdown(payload);
   if (!markdown) {
-    throw new Error("NYOK response did not include markdown content.");
+    throw new Error("Provider response did not include markdown content.");
   }
 
   return {
-    title: payload.title || extractTitle(input.idea),
+    title: extractTitle(markdown, input.idea),
     markdown
   };
+}
+
+export async function generatePrd(input: GeneratePrdInput) {
+  const provider = input.provider || "pollinations";
+  const model =
+    input.model?.trim() ||
+    (provider === "openrouter" ? "openai/gpt-4.1-mini" : "openai");
+
+  if (provider === "openrouter") {
+    if (!input.apiKey) {
+      throw new Error("OpenRouter requires a user-provided API key.");
+    }
+
+    return callOpenAiCompatibleApi(
+      "https://openrouter.ai/api/v1/chat/completions",
+      input.apiKey,
+      model,
+      input,
+      {
+        "HTTP-Referer": "https://github.com/Bilal140202/AI-Product-Requirement-Generator",
+        "X-Title": "AI Product Requirement Generator"
+      }
+    );
+  }
+
+  return callOpenAiCompatibleApi(
+    "https://gen.pollinations.ai/v1/chat/completions",
+    input.apiKey,
+    model,
+    input
+  );
 }

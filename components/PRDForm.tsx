@@ -2,6 +2,7 @@
 
 import { ExportButtons } from "@/components/ExportButtons";
 import { MarkdownViewer } from "@/components/MarkdownViewer";
+import { generatePrdWithWebLLM } from "@/lib/webllm-client";
 import { Sparkles, WandSparkles } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -15,7 +16,21 @@ type AssetPayload = {
   imageUrl?: string;
 };
 
+type Provider = "openrouter" | "pollinations" | "webllm";
+
+function extractTitle(markdown: string, fallbackIdea: string) {
+  const firstHeading = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  if (firstHeading) {
+    return firstHeading.replace(/\s+PRD$/i, "");
+  }
+
+  return fallbackIdea;
+}
+
 export function PRDForm() {
+  const [provider, setProvider] = useState<Provider>("pollinations");
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState("openai");
   const [idea, setIdea] = useState("");
   const [audience, setAudience] = useState("");
   const [constraints, setConstraints] = useState("");
@@ -25,9 +40,10 @@ export function PRDForm() {
   const [assetUrl, setAssetUrl] = useState("");
   const [error, setError] = useState("");
   const [stepIndex, setStepIndex] = useState(0);
+  const [liveStatus, setLiveStatus] = useState("");
 
   useEffect(() => {
-    if (!loading) {
+    if (!loading || provider === "webllm") {
       setStepIndex(0);
       return;
     }
@@ -37,45 +53,78 @@ export function PRDForm() {
     }, 850);
 
     return () => window.clearInterval(intervalId);
-  }, [loading]);
+  }, [loading, provider]);
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoading(true);
     setError("");
+    setLiveStatus("");
 
     try {
-      const payload = { idea, audience, constraints, competitors };
+      let nextMarkdown = "";
+      let nextTitle = idea;
 
-      const response = await fetch("/api/generate-prd", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      });
+      if (provider === "webllm") {
+        nextMarkdown = await generatePrdWithWebLLM({
+          model: model.trim(),
+          idea,
+          audience,
+          constraints,
+          competitors,
+          onProgress: setLiveStatus
+        });
+        nextTitle = extractTitle(nextMarkdown, idea);
+      } else {
+        const payload = {
+          provider,
+          apiKey: apiKey.trim(),
+          model: model.trim(),
+          idea,
+          audience,
+          constraints,
+          competitors
+        };
 
-      const data = (await response.json()) as { markdown?: string; error?: string; title?: string };
+        const response = await fetch("/api/generate-prd", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
 
-      if (!response.ok || !data.markdown) {
-        throw new Error(data.error || "Failed to generate PRD.");
+        const data = (await response.json()) as { markdown?: string; error?: string; title?: string };
+
+        if (!response.ok || !data.markdown) {
+          throw new Error(data.error || "Failed to generate PRD.");
+        }
+
+        nextMarkdown = data.markdown;
+        nextTitle = data.title || idea;
       }
 
-      setMarkdown(data.markdown);
+      setMarkdown(nextMarkdown);
 
-      const assetResponse = await fetch("/api/assets", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          title: data.title || idea
-        })
-      });
+      if (provider !== "webllm") {
+        const assetResponse = await fetch("/api/assets", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            title: nextTitle,
+            provider,
+            apiKey: apiKey.trim()
+          })
+        });
 
-      if (assetResponse.ok) {
-        const assetData = (await assetResponse.json()) as AssetPayload;
-        setAssetUrl(assetData.imageUrl || "");
+        if (assetResponse.ok) {
+          const assetData = (await assetResponse.json()) as AssetPayload;
+          setAssetUrl(assetData.imageUrl || "");
+        }
+      } else {
+        setAssetUrl("");
       }
     } catch (submissionError) {
       setError(
@@ -97,11 +146,76 @@ export function PRDForm() {
           </div>
           <div>
             <h2 className="text-xl font-semibold text-white">Generate a PRD</h2>
-            <p className="text-sm text-slate-400">Describe the product clearly enough for the generator to structure it.</p>
+            <p className="text-sm text-slate-400">Use a real provider only. No placeholder PRDs are returned anymore.</p>
           </div>
         </div>
 
         <div className="mt-6 space-y-4">
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-2 block text-sm text-slate-300">AI provider</span>
+              <select
+                className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-white"
+                onChange={(event) => {
+                  const nextProvider = event.target.value as Provider;
+                  setProvider(nextProvider);
+                  if (nextProvider === "openrouter") {
+                    setModel("openai/gpt-4.1-mini");
+                  } else if (nextProvider === "webllm") {
+                    setModel("Llama-3.1-8B-Instruct");
+                  } else {
+                    setModel("openai");
+                  }
+                }}
+                value={provider}
+              >
+                <option value="pollinations">Pollinations</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="webllm">WebLLM (free local)</option>
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="mb-2 block text-sm text-slate-300">
+                {provider === "openrouter"
+                  ? "OpenRouter API key"
+                  : provider === "pollinations"
+                    ? "Pollinations API key"
+                    : "API key not needed"}
+              </span>
+              <input
+                className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-white placeholder:text-slate-500 disabled:opacity-50"
+                disabled={provider === "webllm"}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder={
+                  provider === "openrouter"
+                    ? "sk-or-v1-..."
+                    : provider === "pollinations"
+                      ? "Optional if your Pollinations endpoint allows anonymous access"
+                      : "Runs directly in the browser with WebGPU"
+                }
+                type="password"
+                value={provider === "webllm" ? "" : apiKey}
+              />
+            </label>
+          </div>
+
+          <label className="block">
+            <span className="mb-2 block text-sm text-slate-300">Model</span>
+            <input
+              className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-white placeholder:text-slate-500"
+              onChange={(event) => setModel(event.target.value)}
+              placeholder={
+                provider === "openrouter"
+                  ? "openai/gpt-4.1-mini"
+                  : provider === "webllm"
+                    ? "Llama-3.1-8B-Instruct"
+                    : "openai"
+              }
+              value={model}
+            />
+          </label>
+
           <label className="block">
             <span className="mb-2 block text-sm text-slate-300">What are you trying to build?</span>
             <textarea
@@ -141,14 +255,25 @@ export function PRDForm() {
         <div className="mt-6 flex flex-wrap items-center gap-4">
           <button
             className="inline-flex items-center gap-2 rounded-full bg-sky-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:opacity-70"
-            disabled={loading}
+            disabled={loading || !model.trim() || (provider === "openrouter" && !apiKey.trim())}
             type="submit"
           >
             <WandSparkles className="h-4 w-4" />
             {loading ? "Generating..." : "Generate PRD"}
           </button>
-          {loading ? <span className="text-sm text-slate-400">{loadingSteps[stepIndex]}</span> : null}
+          {loading && provider !== "webllm" ? <span className="text-sm text-slate-400">{loadingSteps[stepIndex]}</span> : null}
+          {loading && provider === "webllm" && liveStatus ? <span className="text-sm text-slate-400">{liveStatus}</span> : null}
           {error ? <span className="text-sm text-rose-300">{error}</span> : null}
+          {!error && provider === "pollinations" ? (
+            <span className="text-sm text-slate-500">
+              Pollinations is attempted live. If your endpoint rejects anonymous access, add a key and retry.
+            </span>
+          ) : null}
+          {!error && provider === "webllm" ? (
+            <span className="text-sm text-slate-500">
+              WebLLM runs fully in-browser and requires a WebGPU-capable browser. First load may download a large model.
+            </span>
+          ) : null}
         </div>
       </form>
 

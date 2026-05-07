@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@mlc-ai/web-llm": "^0.2.83",
     "clsx": "^2.1.1",
     "html2canvas": "^1.4.1",
     "jspdf": "^3.0.1",

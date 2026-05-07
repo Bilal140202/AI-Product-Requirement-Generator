@@ -8,6 +8,9 @@ export async function POST(request: NextRequest) {
     enforceRateLimit(`prd:${forwardedFor}`);
 
     const body = (await request.json()) as {
+      provider?: "openrouter" | "pollinations";
+      apiKey?: string;
+      model?: string;
       idea?: string;
       audience?: string;
       constraints?: string;
@@ -19,6 +22,9 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await generatePrd({
+      provider: body.provider,
+      apiKey: body.apiKey?.trim(),
+      model: body.model?.trim(),
       idea: body.idea.trim(),
       audience: body.audience?.trim(),
       constraints: body.constraints?.trim(),
